@@ -29,15 +29,14 @@ The repository is structured as follows:
 │   ├── land_use/
 │   ├── jakarta_network/
 │   └── transjakarta_gtfs/
-│
 └── script/
-    ├── 00_setup
-    ├── 01_Trip_Production
-    ├── 01_Trip_Attraction
-    ├── 02_Trip_Distribution
-    ├── 03_ModeSplit_Assignment
-    ├── 05_Visualisation
-    └── 06_PriorityInvesment
+    ├── 00_setup/
+    ├── 01_Trip_Production/
+    ├── 01_Trip_Attraction/
+    ├── 02_Trip_Distribution/
+    ├── 03_ModeSplit_Assignment/
+    ├── 05_Visualisation/
+    └── 06_PriorityInvestment
 
 **data/ — Input Datasets**
 This directory contains the input datasets used throughout the research workflow
