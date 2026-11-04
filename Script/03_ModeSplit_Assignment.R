@@ -110,49 +110,26 @@ tm_shape(edges_pedestrian %>% filter(flow > 0)) +
   )
 
 
+# Approach 2: Pedestrian Demand on MULTIMODAL (walking - public transport - walking)
 
-# ==============================================================================
-# PENDEKATAN 2: MULTIMODAL (walking - public transport - walking)
-# Output: volume pejalan kaki (access + egress) per ruas jalan, peta, dan tabel status
-#
-# Prasyarat objek di environment (dari proses sebelumnya):
-#   - graph_with_od        : graph dodgr pejalan kaki (TIDAK contracted, urutan baris tetap)
-#   - od_distances_df      : origin_zone, origin_vertex, destination_zone, destination_vertex, distance (km)
-#   - od_trip_attributes2  : atribut OD + trips
-# ==============================================================================
-
-library(dplyr)
-library(data.table)
-library(Matrix)
-library(dodgr)
-library(sf)
-library(sfheaders)
-library(tmap)
-
-# ------------------------------------------------------------------------------
-# 0. PARAMETER
-# ------------------------------------------------------------------------------
-SAMPLE_MODE <- TRUE         # TRUE: pakai filter sampel Anda; FALSE: seluruh OD > 2 km
+# PARAMETER
 PT_SHARE    <- 0.2           # pangsa PT (asumsi)
-R_WALK      <- 800           # batas jalan kaki access/egress (meter)
-R_FAR       <- 5000          # radius cari halte untuk sisi non-jalan-kaki (asumsi, uji sensitivitas)
-USE_DECAY   <- TRUE         # FALSE: walk_trips = pt_trips (sesuai keputusan sementara)
-SERVICE_ID  <- "SH"          # NULL = semua service_id
-TRANSFER_MODE <- "cluster"   # "strict" = stop_id sama; "cluster" = nama sama & <= 50 m
-CLUSTER_M   <- 100
+R_WALK      <- 800           # radius threshold for walking (meter)
+R_FAR       <- 5000          # radius threshold for finding bus stop  (asumsi, uji sensitivitas)
+USE_DECAY   <- TRUE         # FALSE: walk_trips = pt_trips
+SERVICE_ID  <- "SH"          # NULL = use all service_id
+TRANSFER_MODE <- "cluster"   # "strict" = stop_id; "cluster" = similar name & distance for transfer
+CLUSTER_M   <- 100           # maximum distance between bus stop for transfer 
 
+#decay function
 decay_logi <- function(d_m, d50 = 0.800, beta = log(9) / 400) {
   1 / (1 + exp(beta * (d_m - d50)))
 }
 
-# ------------------------------------------------------------------------------
-# 1. OD MULTIMODAL
-# ------------------------------------------------------------------------------
-od_distance_PT <- if (SAMPLE_MODE) {
-  od_distances_df %>% filter(distance >= 5.065916, distance < 5.065918)
-} else {
-  od_distances_df %>% filter(distance > 2)      # > 2 km, tidak tumpang tindih dgn pendekatan 1
-}
+# OD MULTIMODAL - pedestrian flow
+
+od_distance_PT <-  od_distances_df %>%
+  filter(distance > 2)
 
 od_trip_multimodal <- od_distance_PT %>%
   left_join(
@@ -174,30 +151,33 @@ od <- as.data.table(od_trip_multimodal)[
   .(origin_zone, destination_zone, origin_vertex, destination_vertex, pt_trips)]
 
 
-# ------------------------------------------------------------------------------
-# 2. BACA & BERSIHKAN GTFS
-# ------------------------------------------------------------------------------
+# load and read gtfs (transjakarta)
 gtfs_dir <- "D:/Github/pedestrianDemand/Data/file_gtfs"
 
+# bus stop
 stops <- fread(file.path(gtfs_dir, "stops.txt"),
                colClasses = list(character = "stop_id"), encoding = "UTF-8")
+
+# stop times
 st    <- fread(file.path(gtfs_dir, "stop_times.txt"),
                select = c("trip_id", "stop_id", "stop_sequence"),
                colClasses = list(character = c("trip_id", "stop_id")))
+
+#trips
 tr    <- fread(file.path(gtfs_dir, "trips.txt"),
                select = c("trip_id", "route_id", "service_id"),
                colClasses = list(character = c("trip_id", "route_id", "service_id")))
 
-# samakan format ID
+# Pre process gtfs dataset
+# id format
 stops[, stop_id := trimws(stop_id)]
 st[, `:=`(stop_id = trimws(stop_id), trip_id = trimws(trip_id))]
 tr[, `:=`(trip_id = trimws(trip_id), service_id = trimws(service_id))]
 
-# stops: koordinat valid & unik
+# bus stops: valid and unique coordinat
 stops <- stops[!is.na(stop_lat) & !is.na(stop_lon)]
 stops <- stops[!duplicated(stop_id)]
 
-# stop_times: hanya halte yang ada
 n_before <- nrow(st)
 st[, stop_sequence := as.integer(stop_sequence)]
 st <- st[!is.na(stop_sequence) & stop_id %in% stops$stop_id]
@@ -207,22 +187,24 @@ if (!is.null(SERVICE_ID)) {
   if (!SERVICE_ID %in% tr$service_id) warning("SERVICE_ID tidak ditemukan; cek unique(tr$service_id)")
   tr <- tr[service_id == SERVICE_ID]
 }
+
+#connect stop_times with trip
 st <- st[tr[, .(trip_id)], on = "trip_id", nomatch = 0]
 setorder(st, trip_id, stop_sequence)
 st <- st[, if (.N >= 2) .SD, by = trip_id]
 
-# pola rute unik (satu trip wakil per urutan halte)
+# create pattern of unique route
 sig <- st[, .(sig = paste(stop_id, collapse = "|")), by = trip_id]
 rep_trips <- sig[!duplicated(sig), trip_id]
 ps <- st[trip_id %in% rep_trips, .(trip_id, stop_id, seq = stop_sequence)]
 
 
-# pasangan halte terhubung langsung (A sebelum B pada pola yang sama)
+# pair of connected bus stops
 direct <- ps[ps, on = "trip_id", allow.cartesian = TRUE][
   seq < i.seq, .(from = stop_id, to = i.stop_id)] |> unique()
 
 
-# stops hanya yang dilalui rute; urutan baris = indeks matriks
+# create matrix for bus stop connectivity
 stops <- stops[stop_id %in% unique(ps$stop_id)]
 ns <- nrow(stops)
 
@@ -232,9 +214,8 @@ D0 <- sparseMatrix(i = match(direct$from, stops$stop_id),
 diag(D0) <- 0
 D0 <- drop0(D0)
 
-# ------------------------------------------------------------------------------
-# 3. SNAP HALTE KE GRAPH, MATRIKS TRANSFER (halte yang sama, tanpa jalan kaki)
-# ------------------------------------------------------------------------------
+
+# Snap bus stop to the network (graph, vertex)
 v <- dodgr_vertices(graph_with_od)
 
 stops[, vertex := v$id[match_points_to_verts(v, cbind(stop_lon, stop_lat), connected = TRUE)]]
@@ -256,15 +237,13 @@ if (TRANSFER_MODE == "strict") {
 }
 D0T <- D0 %*% Tm        # halte naik -> halte tempat pindah rute
 
-# ------------------------------------------------------------------------------
-# 4. JARAK JARINGAN ZONA -> HALTE (<= R_FAR), flag walkable (<= R_WALK)
-# ------------------------------------------------------------------------------
+# network distance ( zone to bus stop = R_FAR), walkable distance (<= R_WALK)
 near_stops <- function(vs, radius, chunk = 100) {
   vv  <- v[match(vs, v$id), ]
-  ord <- order(round(vv$x, 2), vv$y)           # kelompokkan secara spasial
+  ord <- order(round(vv$x, 2), vv$y)
   vs  <- vs[ord]; vv <- vv[ord, ]
   grp <- ceiling(seq_along(vs) / chunk)
-  buf <- radius / 111000 + 0.005               # derajat (pra-filter bbox)
+  buf <- radius / 111000 + 0.005
   
   res <- lapply(split(seq_along(vs), grp), function(ii) {
     xr <- range(vv$x[ii]) + c(-buf, buf)
@@ -280,21 +259,18 @@ near_stops <- function(vs, radius, chunk = 100) {
   })
   out <- rbindlist(res)
   out <- merge(out, stops[, .(stop_i = .I, stop_vertex = vertex)],
-               by = "stop_vertex", allow.cartesian = TRUE)   # 1 vertex bisa >1 stop_id
+               by = "stop_vertex", allow.cartesian = TRUE)
   out[, walk := d <= R_WALK]
   setkey(out, vertex)
   out
 }
 
+#finding candidate bus stop near origin and destination
 acc_dt <- near_stops(unique(od$origin_vertex),      R_FAR)
 egr_dt <- near_stops(unique(od$destination_vertex), R_FAR)   # graph dianggap simetris
 
-# ------------------------------------------------------------------------------
-# 5. ROUTING PT: pilih halte naik/turun (maks. 1 transfer di halte yang sama)
-# ------------------------------------------------------------------------------
-# side = "both": minimalkan egress, lalu ntr, lalu access
-# side = "acc" : minimalkan access (egress via moda lain), lalu ntr
-# side = "egr" : minimalkan egress (access via moda lain), lalu ntr
+#Public transport routing, (searching bus stop for access and egress with maximum transfer =1)
+
 try_pair <- function(A, E, side) {
   if (nrow(A) == 0 || nrow(E) == 0) return(NULL)
   C0 <- as.matrix(D0[A$stop_i, E$stop_i, drop = FALSE]) > 0
@@ -335,7 +311,7 @@ solve_od <- function(ov, dv) {
   list(status = "not_connected")
 }
 
-# routing per pasangan vertex unik (banyak OD berbagi vertex yang sama)
+# routing process for pedestrian
 uv <- unique(od[, .(origin_vertex, destination_vertex)])
 
 
@@ -351,16 +327,12 @@ print(t_route)
 
 res <- merge(od, res_v, by = c("origin_vertex", "destination_vertex"))
 
-# tabel status
 status_tbl <- res[, .(n_od = .N, trips = sum(pt_trips)), by = status][
   , `:=`(pct_od = round(100 * n_od / sum(n_od), 1),
          pct_trips = round(100 * trips / sum(trips), 1))][order(-n_od)]
 
+# pedestrian flow for PT access and egress
 
-# ------------------------------------------------------------------------------
-# 6. LEG JALAN KAKI (access & egress) -> walk_trips
-#    sementara walk_trips = pt_trips (USE_DECAY = FALSE)
-# ------------------------------------------------------------------------------
 w <- function(d) if (USE_DECAY) decay_logi(d) else 1
 
 acc_ok <- res[status %in% c("both_walk", "access_only")]
@@ -378,9 +350,8 @@ pairs <- legs[, .(flow_acc = sum(flow[type == "access"]),
                   flow_egr = sum(flow[type == "egress"])), by = .(from, to)]
 
 
-# ------------------------------------------------------------------------------
-# 7. ASSIGN LEG KE GRAPH PEJALAN KAKI (indeks edge, tanpa membuat geometri per rute)
-# ------------------------------------------------------------------------------
+# Assign leg to the network (graph)
+
 paths_multimodal <- dodgr_paths(graph = graph_with_od,
                        from = pairs$from, to = pairs$to,
                        pairwise = TRUE, vertices = FALSE)
@@ -400,9 +371,7 @@ flows <- data.table(
 )[, .(flow_acc = sum(flow_acc), flow_egr = sum(flow_egr)), by = edge_idx]
 flows[, flow_total := flow_acc + flow_egr]
 
-# ------------------------------------------------------------------------------
-# 8. GABUNGKAN DUA ARAH DI TABEL BIASA, GEOMETRI DIBUAT SEKALI
-# ------------------------------------------------------------------------------
+# aggregate flow in two direction
 g_df <- as.data.frame(graph_with_od)
 dt_multimodal <- as.data.table(g_df[flows$edge_idx, c("from_id", "to_id")])
 dt_multimodal <- cbind(dt_multimodal, flows[, .(flow_acc, flow_egr, flow_total)])
@@ -428,9 +397,7 @@ edges_ped_pt$flow_total <- dt_u_multimodal$flow_total
 edges_ped_pt$vertex_a   <- dt_u_multimodal$a
 edges_ped_pt$vertex_b   <- dt_u_multimodal$b
 
-# ------------------------------------------------------------------------------
-# 9. VISUALISASI: flow pejalan kaki per ruas
-# ------------------------------------------------------------------------------
+#Visualitsation: pedestrian flow per segment
 tmap_mode("view")
 
 tm_shape(edges_ped_pt %>% filter(flow_total > 0)) +
@@ -452,18 +419,8 @@ tm_shape(edges_ped_pt %>% filter(flow_total > 0)) +
   )
 
 
-#PENGGABUNGAN PENDEKATAN 1 DAN 2
 
-# ==============================================================================
-# GABUNGKAN FLOW PENDEKATAN 1 (walk-only) DAN PENDEKATAN 2 (access/egress PT)
-# Kunci ruas: (a, b) = pmin/pmax(from_id, to_id) pada graph_with_od yang SAMA
-# ==============================================================================
-
-
-# ------------------------------------------------------------------------------
-# A. SIMPAN HASIL TIAP PENDEKATAN (jalankan tepat setelah dt_u terbentuk)
-#    Objek flows, dt, dt_u, n, coords, lens ditimpa oleh pendekatan 2,
-#    jadi simpan hasil pendekatan 1 lebih dulu.
+#Join pedestrian demand approach 1 and approach 2
 
 vol1 <- copy(dt_u_pedestrian)[, .(a, b, flow_walkonly = flow)]
 vol2 <- copy(dt_u_multimodal)[, .(a, b, flow_acc, flow_egr)]
@@ -477,14 +434,7 @@ stopifnot(is.character(vol1$a), is.character(vol1$b),
 g <- as.data.table(as.data.frame(graph_with_od))[, .(from_id, to_id)]
 g_keys <- unique(g[, .(a = pmin(from_id, to_id), b = pmax(from_id, to_id))])
 
-n_miss <- function(x) nrow(x[!g_keys, on = c("a", "b")])
-cat("Ruas pendekatan 1 yang tidak ada di graph :", n_miss(vol1), "\n")
-cat("Ruas pendekatan 2 yang tidak ada di graph :", n_miss(vol2), "\n")
-# keduanya harus 0. Jika > 0, graph berbeda antar sesi/proses.
-
-# ------------------------------------------------------------------------------
-# C. GABUNGKAN PER RUAS
-# ------------------------------------------------------------------------------
+# Join per segment
 vol_all <- merge(vol1, vol2, by = c("a", "b"), all = TRUE)
 for (j in c("flow_walkonly", "flow_acc", "flow_egr"))
   set(vol_all, which(is.na(vol_all[[j]])), j, 0)
@@ -493,13 +443,8 @@ vol_all[, `:=`(flow_pt    = flow_acc + flow_egr,
                flow_total = flow_walkonly + flow_acc + flow_egr)]
 vol_all[, share_pt := fifelse(flow_total > 0, flow_pt / flow_total, NA_real_)]
 
-cat("Jumlah ruas: walk-only =", nrow(vol1), "| multimodal =", nrow(vol2),
-    "| gabungan =", nrow(vol_all), "| beririsan =",
-    nrow(vol_all[flow_walkonly > 0 & flow_pt > 0]), "\n")
-
-# ------------------------------------------------------------------------------
 # D. GEOMETRI SEKALI (dari vertex graph)
-# ------------------------------------------------------------------------------
+
 v  <- dodgr_vertices(graph_with_od)
 ia <- match(vol_all$a, v$id)
 ib <- match(vol_all$b, v$id)
@@ -514,13 +459,10 @@ coords <- data.frame(
 edges_all <- sfheaders::sf_linestring(obj = coords, x = "x", y = "y",
                                       linestring_id = "edge_id") |>
   sf::st_set_crs(4326)
-edges_all <- cbind(edges_all, as.data.frame(vol_all))   # urutan baris sama
+edges_all <- cbind(edges_all, as.data.frame(vol_all)) 
 
+# MAP visualisation
 
-
-# ------------------------------------------------------------------------------
-# E. PETA: ruas yang membawa 80% demand, lebar & warna menurut flow_total
-# ------------------------------------------------------------------------------
 e <- edges_all %>%
   filter(!is.na(flow_total), flow_total > 0) %>%
   arrange(desc(flow_total)) %>%
@@ -556,6 +498,9 @@ tm_shape(edges_all) +
   )
 
 
+
+
+### under development to visualise public transport flow: (review later)
 
 #optional: public transport route flow
 # ==============================================================================
