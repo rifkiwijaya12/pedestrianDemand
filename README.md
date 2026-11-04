@@ -21,23 +21,6 @@ The methodology consists of the following stages:
    c. High pedestrian demands in roads with mapped dedicated pedestrian facilities.
    
 ## Repository Structure
-The repository is structured as follows:
-.
-├── README.md
-├── data/
-│   ├── population/
-│   ├── land_use/
-│   ├── jakarta_network/
-│   └── transjakarta_gtfs/
-└── script/
-    ├── 00_setup/
-    ├── 01_Trip_Production/
-    ├── 01_Trip_Attraction/
-    ├── 02_Trip_Distribution/
-    ├── 03_ModeSplit_Assignment/
-    ├── 05_Visualisation/
-    └── 06_PriorityInvestment
-
 **data/ — Input Datasets**
 This directory contains the input datasets used throughout the research workflow
 
@@ -61,6 +44,7 @@ This directory contains the input datasets used throughout the research workflow
 
 **Execution Order**
 The analytical scripts are designed to be executed sequentially, following the numbering convention in the script/ directory.
+
 ## Quick Start
 ### Prerequisites
 Before running this project, ensure that you have installed:
