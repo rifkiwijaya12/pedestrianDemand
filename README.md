@@ -80,3 +80,4 @@ https://rifkiwijaya12-pedestriandemandapp.share.connect.posit.cloud/
 For users who interest in changing parameter, please follow the instruction the Quick Start section.
 
 ## Data Availability
+Dataset regarding land use and zonal boundaries is retrievable via the JakartaSatu geoportal (https://jakartasatu.jakarta.go.id/geoportal)
